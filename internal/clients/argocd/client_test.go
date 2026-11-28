@@ -2,6 +2,7 @@ package argocd
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -292,5 +293,63 @@ func TestGetResource(t *testing.T) {
 	}
 	if strings.Contains(q, "group=") {
 		t.Errorf("empty group must be omitted: %s", q)
+	}
+}
+
+func TestPatchApplicationSendsJSONPatch(t *testing.T) {
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPatch || r.URL.Path != "/api/v1/applications/web" || r.Header.Get("Content-Type") != "application/json" {
+			t.Errorf("%s %s %s", r.Method, r.URL.Path, r.Header.Get("Content-Type"))
+		}
+		var body map[string]string
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		if body["patchType"] != "json" || body["project"] != "p" || !strings.Contains(body["patch"], `"op":"test"`) {
+			t.Errorf("body %v", body)
+		}
+		jsonResp(w, `{"metadata":{"name":"web","resourceVersion":"2"}}`)
+	})
+	app, err := c.PatchApplication(context.Background(), AppRef{Name: "web", Project: "p"},
+		[]PatchOp{{Op: "test", Path: "/metadata/resourceVersion", Value: "1"}, {Op: "replace", Path: "/spec/source/helm/parameters", Value: []HelmParameter{{Name: "image.tag", Value: "2"}}}})
+	if err != nil || app.Metadata.ResourceVersion != "2" {
+		t.Fatalf("%v %+v", err, app)
+	}
+}
+
+func TestSyncApplicationAndConflicts(t *testing.T) {
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/api/v1/applications/web/sync" {
+			t.Errorf("%s %s", r.Method, r.URL.Path)
+		}
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		if body["prune"] != false || body["dryRun"] != false {
+			t.Errorf("body %v", body)
+		}
+		jsonResp(w, `{"metadata":{"name":"web"},"operation":{"sync":{}}}`)
+	})
+	app, err := c.SyncApplication(context.Background(), AppRef{Name: "web"}, SyncOptions{})
+	if err != nil || len(app.Operation) == 0 {
+		t.Fatalf("%v %+v", err, app)
+	}
+
+	for _, tc := range []struct {
+		status int
+		body   string
+		target error
+	}{
+		{400, `{"code":9,"message":"another operation is already in progress"}`, ErrConflict},
+		{400, `{"code":3,"message":"application spec is invalid"}`, ErrInvalid},
+		{409, `{"code":10,"message":"the object has been modified"}`, ErrConflict},
+		{403, `{"code":7,"message":"permission denied: applications, sync, proj/web"}`, ErrForbidden},
+	} {
+		c := newTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(tc.status)
+			_, _ = w.Write([]byte(tc.body))
+		})
+		_, err := c.SyncApplication(context.Background(), AppRef{Name: "web"}, SyncOptions{})
+		if !errors.Is(err, tc.target) {
+			t.Errorf("%s: got %v", tc.body, err)
+		}
 	}
 }

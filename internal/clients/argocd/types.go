@@ -7,20 +7,47 @@ import "encoding/json"
 
 type objectMeta struct {
 	Name              string            `json:"name"`
+	ResourceVersion   string            `json:"resourceVersion,omitempty"`
+	OwnerReferences   []OwnerReference  `json:"ownerReferences,omitempty"`
 	Namespace         string            `json:"namespace,omitempty"`
 	Labels            map[string]string `json:"labels,omitempty"`
 	Annotations       map[string]string `json:"annotations,omitempty"`
 	CreationTimestamp string            `json:"creationTimestamp,omitempty"`
 }
 
+// OwnerReference is a Kubernetes owner reference (e.g. an ApplicationSet).
+type OwnerReference struct {
+	Kind string `json:"kind"`
+	Name string `json:"name"`
+}
+
 // Source is an application source.
 type Source struct {
-	RepoURL        string `json:"repoURL"`
-	Path           string `json:"path,omitempty"`
-	Chart          string `json:"chart,omitempty"`
-	TargetRevision string `json:"targetRevision,omitempty"`
-	Ref            string `json:"ref,omitempty"`
-	Name           string `json:"name,omitempty"`
+	RepoURL        string           `json:"repoURL"`
+	Path           string           `json:"path,omitempty"`
+	Chart          string           `json:"chart,omitempty"`
+	TargetRevision string           `json:"targetRevision,omitempty"`
+	Ref            string           `json:"ref,omitempty"`
+	Name           string           `json:"name,omitempty"`
+	Helm           *HelmSource      `json:"helm,omitempty"`
+	Kustomize      *KustomizeSource `json:"kustomize,omitempty"`
+}
+
+// HelmSource holds the Helm parameter overrides of a source.
+type HelmSource struct {
+	Parameters []HelmParameter `json:"parameters,omitempty"`
+}
+
+// HelmParameter is a Helm --set (or --set-string when ForceString) override.
+type HelmParameter struct {
+	Name        string `json:"name"`
+	Value       string `json:"value"`
+	ForceString bool   `json:"forceString,omitempty"`
+}
+
+// KustomizeSource holds the Kustomize image overrides of a source.
+type KustomizeSource struct {
+	Images []string `json:"images,omitempty"`
 }
 
 // Destination is the target cluster and namespace.
@@ -54,6 +81,21 @@ type OperationState struct {
 	Operation  struct {
 		InitiatedBy Initiator `json:"initiatedBy"`
 	} `json:"operation"`
+	SyncResult *struct {
+		Revision  string           `json:"revision,omitempty"`
+		Resources []ResourceResult `json:"resources,omitempty"`
+	} `json:"syncResult,omitempty"`
+}
+
+// ResourceResult is one resource's outcome in a sync operation.
+type ResourceResult struct {
+	Group     string `json:"group,omitempty"`
+	Kind      string `json:"kind"`
+	Namespace string `json:"namespace,omitempty"`
+	Name      string `json:"name"`
+	Status    string `json:"status,omitempty"`
+	Message   string `json:"message,omitempty"`
+	HookPhase string `json:"hookPhase,omitempty"`
 }
 
 // Initiator is who started an operation.
@@ -104,6 +146,7 @@ type appStatus struct {
 	Resources      []ResourceStatus `json:"resources,omitempty"`
 	ReconciledAt   string           `json:"reconciledAt,omitempty"`
 	SourceType     string           `json:"sourceType,omitempty"`
+	SourceTypes    []string         `json:"sourceTypes,omitempty"`
 	Summary        struct {
 		Images       []string `json:"images,omitempty"`
 		ExternalURLs []string `json:"externalURLs,omitempty"`
@@ -115,6 +158,8 @@ type Application struct {
 	Metadata objectMeta `json:"metadata"`
 	Spec     appSpec    `json:"spec"`
 	Status   appStatus  `json:"status"`
+	// Operation is set while an operation (e.g. a sync) is requested or running.
+	Operation json.RawMessage `json:"operation,omitempty"`
 }
 
 type applicationList struct {

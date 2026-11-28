@@ -69,6 +69,73 @@ Every response has these fields: `application`, `deployment`, `pod`, `analysis_t
 - **Results:** at most `max_results` items per list (default 20, max 200), paged with `offset` and `next_offset`. Messages, stacks and context are size-capped.
 - **Secrets:** all returned text is redacted, including auth headers, bearer/basic tokens, cookies, passwords and API keys, JWTs, AWS keys, and URL credentials. Query strings are dropped from HTTP paths and queue URLs, so signed URLs aren't exposed.
 
+## Deploy server (write-enabled, 3 tools)
+
+`cmd/deploy` is a **separate binary**, `argocd-deploy-mcp`, with exactly three tools. The read-only server above is unchanged, so you choose which one an MCP client gets.
+
+| Tool | What it does | Argo CD API | RBAC |
+|---|---|---|---|
+| `argocd_get_application_status` | Read-only: sync/health, running images, image overrides per source, auto-sync, running operation | `GET /applications/{app}` | `applications, get` |
+| `update_application_image` | Sets the image tag (and optionally repository) as an **Argo CD parameter override, without Git** | `PATCH /applications/{app}` (JSON Patch) | `applications, update` |
+| `argocd_sync_application` | **Preview → developer confirmation → sync → wait → verify health** | `POST /applications/{app}/sync` | `applications, sync` |
+
+No Git, Jenkins or Kubernetes API is used.
+
+### How the image update works
+- **Helm:** sets `image.tag` / `image.repository`, or your names via `ARGOCD_HELM_TAG_PARAM` / `ARGOCD_HELM_REPOSITORY_PARAM` or the tool arguments.
+  - Values are written as `forceString`, so `1.10` stays `1.10`.
+  - **Only `helm.parameters` is patched.** Every other parameter, `valueFiles`, `values` and all other settings are kept.
+- **Kustomize:** updates the matching `kustomize.images` entry (`name=newName:tag`) and keeps the others.
+- **Other source types** (plain directory, plugin) can't change an image without Git, so the tool refuses.
+- **Safe concurrent updates:** the patch starts with a JSON Patch `test` of `metadata.resourceVersion`. If someone changed the app in the meantime, nothing is written and the tool returns `conflict`.
+- **It checks that the change takes effect.** After patching, it reads the rendered manifests and reports `renderedImageVerified`. `false` means the parameter name doesn't match the chart, so a sync wouldn't change the image.
+- **It refuses ApplicationSet-generated apps**, because the ApplicationSet would revert the override. It warns for app-of-apps children.
+- **Auto-sync apps:** applying the change deploys it immediately, so the update itself first returns `CONFIRMATION_REQUIRED`.
+
+### Confirmation and verification for sync
+1. **First call** (no token): returns a **preview** (out-of-sync resources, images, prune) and a `confirmationToken`. Nothing is synced.
+2. **The developer approves** the preview in the chat.
+3. **Second call** with the token: syncs, then waits until **this** operation finished and health settled.
+
+| Result | Meaning |
+|---|---|
+| `DEPLOYED_HEALTHY` | Sync succeeded and the app is Healthy. With `expectedImage`, `expectedImageRunning` confirms the new image runs |
+| `SYNC_FAILED` | The operation failed. `failedResources` lists each resource's message |
+| `DEGRADED` | Synced, but the app stayed Degraded. `unhealthyResources` lists them |
+| `SUSPENDED` | Synced, but a resource is suspended (e.g. a paused rollout) |
+| `TIMEOUT` | Not finished within `timeoutSeconds` (default 300, max 900). Re-check with `argocd_get_application_status` |
+
+How the confirmation token works:
+- It's **single-use** and expires after 5 minutes.
+- It's bound to the app, the action, `prune`, and a fingerprint of the app spec. If the app changes after the preview, the token is rejected.
+- `prune` defaults to `false`.
+
+> [!IMPORTANT]
+> The confirmation step relies on the AI client showing the preview to you before it calls the tool again. Both write tools are marked **destructive**, so VS Code and Claude ask you before running them. **Don't enable auto-approve for these tools.**
+
+### Rollback
+Call `update_application_image` with the previous tag, which is in the plan's `changes[].old`, then sync again.
+
+### Policy and settings
+| Variable | Default | Description |
+|---|---|---|
+| `ARGOCD_DEPLOY_ALLOWED_PROJECTS` | *(all)* | Comma-separated Argo CD projects this server may change. Checked against the app's real project |
+| `ARGOCD_HELM_TAG_PARAM` | `image.tag` | Helm parameter holding the tag |
+| `ARGOCD_HELM_REPOSITORY_PARAM` | `image.repository` | Helm parameter holding the repository |
+| `ARGOCD_SYNC_TIMEOUT` | `5m` | Default wait for sync and health (max `15m`) |
+
+Errors use the same envelope as the read-only server, plus three write-path codes:
+- `conflict`: an operation is running, the app changed concurrently, or a sync window blocks the sync;
+- `confirmation_invalid`: the token is missing, expired, already used, or doesn't match;
+- `precondition_failed`: the project isn't allowed, an ApplicationSet owns the app, or the source type has no override.
+
+```bash
+task build-deploy        # -> dist/argocd-deploy-mcp
+claude mcp add argocd-deploy -e ARGOCD_SERVER=argocd.example.com \
+  -e ARGOCD_AUTH_TOKEN_FILE=$HOME/.config/devops-mcp/argocd-token \
+  -e ARGOCD_DEPLOY_ALLOWED_PROJECTS=team-a -- /absolute/path/to/dist/argocd-deploy-mcp
+```
+
 ## Authentication
 
 ```text
@@ -192,6 +259,8 @@ internal/clients/argocd/    REST client: typed errors, path escaping, streaming 
 internal/tools/argocd/      MCP tool definitions, input validation, response shaping
 internal/imageref/          image reference parsing/normalization (tag, registry digest)
 internal/loganalysis/       log parsing (JSON/logfmt/plain, stack merging), analyzers, redaction
+internal/deploy/            deploy use cases: image-override planning, confirmations, sync wait
+internal/tools/deploy/      the 3 deploy MCP tools (cmd/deploy)
 internal/toolkit/           shared error envelope and validators
 internal/mcp/               builds the MCP server from independent tool sets
 internal/transport/         stdio (an HTTP transport can be added here)

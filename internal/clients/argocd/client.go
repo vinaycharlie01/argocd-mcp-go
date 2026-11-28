@@ -6,6 +6,7 @@
 package argocd
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
@@ -33,11 +34,25 @@ var (
 	ErrUnauthorized = errors.New("unauthorized")
 	ErrForbidden    = errors.New("forbidden")
 	ErrNotFound     = errors.New("not found")
+	// ErrConflict: another operation is running, the app changed concurrently,
+	// a sync window blocks the sync, or another precondition failed.
+	ErrConflict = errors.New("conflict")
+	// ErrInvalid: Argo CD rejected the request as invalid (e.g. spec validation).
+	ErrInvalid = errors.New("invalid request")
+)
+
+// gRPC status codes Argo CD returns in error bodies.
+const (
+	grpcInvalidArgument    = 3
+	grpcAlreadyExists      = 6
+	grpcFailedPrecondition = 9
+	grpcAborted            = 10
 )
 
 // APIError is a non-2xx response from Argo CD.
 type APIError struct {
 	Status  int
+	Code    int // gRPC status code from the error body, when present
 	Message string
 }
 
@@ -49,6 +64,12 @@ func (e *APIError) Error() string {
 		return "permission denied by Argo CD RBAC (403): " + e.Message
 	case http.StatusNotFound:
 		return "not found (404): " + e.Message
+	}
+	switch {
+	case e.Is(ErrConflict):
+		return "Argo CD refused the request (precondition): " + e.Message
+	case e.Is(ErrInvalid):
+		return "Argo CD rejected the request as invalid: " + e.Message
 	default:
 		return fmt.Sprintf("Argo CD returned HTTP %d: %s", e.Status, e.Message)
 	}
@@ -63,6 +84,10 @@ func (e *APIError) Is(target error) bool {
 		return e.Status == http.StatusForbidden
 	case ErrNotFound:
 		return e.Status == http.StatusNotFound
+	case ErrConflict:
+		return e.Status == http.StatusConflict || e.Code == grpcFailedPrecondition || e.Code == grpcAborted || e.Code == grpcAlreadyExists
+	case ErrInvalid:
+		return e.Code == grpcInvalidArgument
 	}
 
 	return false
@@ -138,11 +163,22 @@ func newHTTPClient(opts Options) (*http.Client, error) {
 
 // get performs an authenticated GET of /api/v1/<segments> and decodes JSON into out.
 func (c *Client) get(ctx context.Context, q url.Values, out any, segments ...string) error {
-	resp, err := c.send(ctx, q, segments...)
+	return c.do(ctx, http.MethodGet, q, nil, out, segments...)
+}
+
+// do performs an authenticated request with an optional JSON body and decodes
+// the JSON response into out (if non-nil).
+func (c *Client) do(ctx context.Context, method string, q url.Values, body, out any, segments ...string) error {
+	resp, err := c.send(ctx, method, q, body, segments...)
 	if err != nil {
 		return err
 	}
 	defer resp.Body.Close()
+	if out == nil {
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxResponseBytes))
+
+		return nil
+	}
 	if err := json.NewDecoder(io.LimitReader(resp.Body, maxResponseBytes)).Decode(out); err != nil {
 		return fmt.Errorf("decode Argo CD response: %w", err)
 	}
@@ -150,9 +186,9 @@ func (c *Client) get(ctx context.Context, q url.Values, out any, segments ...str
 	return nil
 }
 
-// send performs an authenticated GET and returns a 2xx JSON response; the
+// send performs an authenticated request and returns a 2xx JSON response; the
 // caller must close the body. Non-2xx responses become *APIError.
-func (c *Client) send(ctx context.Context, q url.Values, segments ...string) (*http.Response, error) {
+func (c *Client) send(ctx context.Context, method string, q url.Values, body any, segments ...string) (*http.Response, error) {
 	token, err := c.tokens.Token()
 	if err != nil {
 		return nil, err
@@ -163,9 +199,20 @@ func (c *Client) send(ctx context.Context, q url.Values, segments ...string) (*h
 	}
 	u.RawQuery = q.Encode()
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
+	var reader io.Reader
+	if body != nil {
+		b, err := json.Marshal(body)
+		if err != nil {
+			return nil, fmt.Errorf("encode request: %w", err)
+		}
+		reader = bytes.NewReader(b)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, u.String(), reader)
 	if err != nil {
 		return nil, fmt.Errorf("build request: %w", err)
+	}
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
 	}
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("User-Agent", "argocd-mcp-go/"+version.Version)
@@ -179,7 +226,9 @@ func (c *Client) send(ctx context.Context, q url.Values, segments ...string) (*h
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
 		defer resp.Body.Close()
 
-		return nil, &APIError{Status: resp.StatusCode, Message: errorMessage(resp)}
+		msg, code := errorMessage(resp)
+
+		return nil, &APIError{Status: resp.StatusCode, Code: code, Message: msg}
 	}
 	if ct := resp.Header.Get("Content-Type"); ct != "" && !strings.Contains(ct, "json") {
 		resp.Body.Close()
@@ -208,24 +257,25 @@ func (c *Client) endpoint(segments ...string) (*url.URL, error) {
 	return &u, nil
 }
 
-// errorMessage extracts the grpc-gateway error message.
-func errorMessage(resp *http.Response) string {
+// errorMessage extracts the grpc-gateway error message and gRPC status code.
+func errorMessage(resp *http.Response) (string, int) {
 	b, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBytes))
 	var e struct {
+		Code    int    `json:"code"`
 		Message string `json:"message"`
 		Error   string `json:"error"`
 	}
 	if json.Unmarshal(b, &e) == nil {
 		if e.Message != "" {
-			return e.Message
+			return e.Message, e.Code
 		}
 		if e.Error != "" {
-			return e.Error
+			return e.Error, e.Code
 		}
 	}
 	if s := strings.TrimSpace(string(b)); s != "" && !strings.HasPrefix(s, "<") {
-		return s
+		return s, 0
 	}
 
-	return http.StatusText(resp.StatusCode)
+	return http.StatusText(resp.StatusCode), 0
 }

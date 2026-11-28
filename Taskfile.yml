@@ -25,6 +25,12 @@ tasks:
       - mkdir -p {{.DIST_DIR}}
       - go build -trimpath -ldflags "{{.LDFLAGS}}" -o {{.DIST_DIR}}/{{.BINARY_NAME}} ./cmd/server
 
+  build-deploy:
+    desc: Build the write-enabled deploy server (3 tools)
+    cmds:
+      - mkdir -p {{.DIST_DIR}}
+      - go build -trimpath -ldflags "{{.LDFLAGS}}" -o {{.DIST_DIR}}/argocd-deploy-mcp ./cmd/deploy
+
   build-linux:
     desc: Cross-compile linux/amd64 and linux/arm64 binaries
     cmds:
@@ -49,6 +55,12 @@ tasks:
           '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
           '{"jsonrpc":"2.0","id":2,"method":"tools/list"}'; sleep 1; } \
           | {{.DIST_DIR}}/{{.BINARY_NAME}} 2>/dev/null | grep -o '"name":"argocd_[a-z_]*"'
+
+  run-deploy:
+    desc: Run the deploy server over stdio (reads ARGOCD_* from the environment or .env)
+    dotenv: ['.env']
+    cmds:
+      - go run ./cmd/deploy
 
   test:
     desc: Run unit tests
