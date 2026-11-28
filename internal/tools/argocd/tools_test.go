@@ -157,7 +157,7 @@ func TestAllToolsRegistered(t *testing.T) {
 			t.Errorf("%s must be read-only", tl.Name)
 		}
 	}
-	want := "argocd_get_application,argocd_get_application_events,argocd_get_application_history,argocd_get_application_manifests,argocd_get_application_resources,argocd_get_images,argocd_get_pod_logs,argocd_list_applications"
+	want := "argocd_analyze_pod_logs,argocd_get_application,argocd_get_application_events,argocd_get_application_history,argocd_get_application_manifests,argocd_get_application_resources,argocd_get_images,argocd_get_pod_logs,argocd_list_applications"
 	if strings.Join(names, ",") != want {
 		t.Fatalf("tools = %v", names)
 	}
