@@ -8,11 +8,11 @@ ARG VERSION=dev
 ARG GIT_COMMIT=unknown
 RUN CGO_ENABLED=0 go build -trimpath \
     -ldflags "-s -w -X github.com/vinaycharlie01/argocd-mcp-go/pkg/version.Version=${VERSION} -X github.com/vinaycharlie01/argocd-mcp-go/pkg/version.GitCommit=${GIT_COMMIT}" \
-    -o /out/argocd-mcp ./cmd/argocd-mcp
+    -o /out/devops-mcp ./cmd/server
 
+# Runs over stdio: start with `docker run -i` from the MCP client.
 FROM gcr.io/distroless/static-debian12:nonroot
-COPY --from=build /out/argocd-mcp /usr/local/bin/argocd-mcp
-ENV MCP_TRANSPORT=http MCP_HTTP_ADDR=:8080 LOG_FORMAT=json
-EXPOSE 8080
+COPY --from=build /out/devops-mcp /usr/local/bin/devops-mcp
+ENV LOG_FORMAT=json
 USER nonroot:nonroot
-ENTRYPOINT ["/usr/local/bin/argocd-mcp"]
+ENTRYPOINT ["/usr/local/bin/devops-mcp"]

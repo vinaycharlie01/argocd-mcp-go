@@ -7,60 +7,59 @@ import (
 
 func env(m map[string]string) func(string) string { return func(k string) string { return m[k] } }
 
-func TestLoadDefaults(t *testing.T) {
-	c, err := LoadFrom(env(map[string]string{"ARGOCD_SERVER_URL": "https://argocd.example.com/"}))
+func TestArgoCDEnabled(t *testing.T) {
+	c, err := LoadFrom(env(map[string]string{"ARGOCD_SERVER": "argocd.example.com", "ARGOCD_AUTH_TOKEN": "t"}))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.ArgoCD.ServerURL != "https://argocd.example.com" {
-		t.Errorf("trailing slash not trimmed: %q", c.ArgoCD.ServerURL)
-	}
-	if c.MCP.Transport != TransportStdio || c.OIDC.RedirectURL != DefaultLocalRedirectURL || !c.OIDC.OpenBrowser {
-		t.Errorf("unexpected defaults: %+v", c)
+	if c.ArgoCD == nil || c.ArgoCD.BaseURL != "https://argocd.example.com" || c.ArgoCD.Timeout.Seconds() != 30 {
+		t.Fatalf("%+v", c.ArgoCD)
 	}
 }
 
-func TestHTTPModeDerivesCallback(t *testing.T) {
-	c, err := LoadFrom(env(map[string]string{
-		"ARGOCD_SERVER_URL": "https://argocd.example.com",
-		"MCP_TRANSPORT":     "http",
-		"MCP_PUBLIC_URL":    "https://mcp.example.com/",
-	}))
-	if err != nil {
-		t.Fatal(err)
+func TestNormalizeServerURL(t *testing.T) {
+	ok := map[string]string{
+		"argocd.example.com":          "https://argocd.example.com",
+		"argocd.example.com:8443":     "https://argocd.example.com:8443",
+		"https://argocd.example.com/": "https://argocd.example.com",
+		"https://example.com/argo-cd": "https://example.com/argo-cd",
 	}
-	if c.OIDC.RedirectURL != "https://mcp.example.com/auth/callback" {
-		t.Errorf("redirect = %q", c.OIDC.RedirectURL)
+	for in, want := range ok {
+		if got, err := NormalizeServerURL(in); err != nil || got != want {
+			t.Errorf("%q => %q %v, want %q", in, got, err, want)
+		}
+	}
+	for _, bad := range []string{"http://argocd.example.com", "https://u:p@argocd.example.com", "https://a.example.com?x=1", "ftp://a"} {
+		if _, err := NormalizeServerURL(bad); err == nil {
+			t.Errorf("%q should be rejected", bad)
+		}
 	}
 }
 
-func TestValidation(t *testing.T) {
-	cases := map[string]map[string]string{
-		"missing server":   {},
-		"http server":      {"ARGOCD_SERVER_URL": "http://argocd.example.com"},
-		"http public url":  {"ARGOCD_SERVER_URL": "https://a.example.com", "MCP_TRANSPORT": "http", "MCP_PUBLIC_URL": "http://mcp.example.com"},
-		"http no public":   {"ARGOCD_SERVER_URL": "https://a.example.com", "MCP_TRANSPORT": "http"},
-		"bad transport":    {"ARGOCD_SERVER_URL": "https://a.example.com", "MCP_TRANSPORT": "sse"},
-		"issuer no client": {"ARGOCD_SERVER_URL": "https://a.example.com", "OIDC_ISSUER_URL": "https://login.microsoftonline.com/t/v2.0"},
-		"bad bool":         {"ARGOCD_SERVER_URL": "https://a.example.com", "OIDC_OPEN_BROWSER": "maybe"},
-		"bad duration":     {"ARGOCD_SERVER_URL": "https://a.example.com", "OIDC_LOGIN_WAIT": "soon"},
-		"remote http cb":   {"ARGOCD_SERVER_URL": "https://a.example.com", "OIDC_REDIRECT_URL": "http://mcp.example.com/cb"},
+func TestValidationErrors(t *testing.T) {
+	cases := map[string]struct {
+		env  map[string]string
+		want string
+	}{
+		"nothing configured": {map[string]string{}, "no integration configured"},
+		"missing token":      {map[string]string{"ARGOCD_SERVER": "a.example.com"}, "ARGOCD_AUTH_TOKEN"},
+		"bad bool":           {map[string]string{"ARGOCD_SERVER": "a.example.com", "ARGOCD_AUTH_TOKEN": "t", "ARGOCD_INSECURE": "maybe"}, "ARGOCD_INSECURE"},
+		"bad timeout":        {map[string]string{"ARGOCD_SERVER": "a.example.com", "ARGOCD_AUTH_TOKEN": "t", "ARGOCD_REQUEST_TIMEOUT": "soon"}, "ARGOCD_REQUEST_TIMEOUT"},
+		"http server":        {map[string]string{"ARGOCD_SERVER": "http://a.example.com", "ARGOCD_AUTH_TOKEN": "t"}, "https"},
 	}
-	for name, e := range cases {
+	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
-			if _, err := LoadFrom(env(e)); err == nil {
-				t.Fatal("expected error")
+			_, err := LoadFrom(env(tc.env))
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("want error containing %q, got %v", tc.want, err)
 			}
 		})
 	}
 }
 
-func TestScopesParsing(t *testing.T) {
-	c, err := LoadFrom(env(map[string]string{"ARGOCD_SERVER_URL": "https://a.example.com", "OIDC_SCOPES": "openid, profile email"}))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.Join(c.OIDC.Scopes, "|") != "openid|profile|email" {
-		t.Errorf("scopes = %v", c.OIDC.Scopes)
+func TestTokenFileAlone(t *testing.T) {
+	c, err := LoadFrom(env(map[string]string{"ARGOCD_SERVER": "a.example.com", "ARGOCD_AUTH_TOKEN_FILE": "/tmp/x"}))
+	if err != nil || c.ArgoCD.TokenFile != "/tmp/x" {
+		t.Fatalf("%v %+v", err, c)
 	}
 }
