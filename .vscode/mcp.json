@@ -1,21 +1,27 @@
 {
-  // Open this folder in VS Code, then start "argocd" from "MCP: List Servers".
-  // Ask the agent to run the `login` tool: your browser opens the Microsoft sign-in.
+  // Open this folder in VS Code, then start "devops" from "MCP: List Servers".
+  // VS Code prompts for the values below; the token is stored as a secret.
   "inputs": [
     {
       "type": "promptString",
-      "id": "argocd-url",
-      "description": "Argo CD URL",
-      "default": "https://argocd-lowerenv.qwikcilver.com"
+      "id": "argocd-server",
+      "description": "Argo CD server host, e.g. argocd.example.com"
+    },
+    {
+      "type": "promptString",
+      "id": "argocd-token",
+      "description": "Argo CD token (value of the argocd.token cookie)",
+      "password": true
     }
   ],
   "servers": {
-    "argocd": {
+    "devops": {
       "type": "stdio",
       "command": "go",
-      "args": ["run", "${workspaceFolder}/cmd/argocd-mcp"],
+      "args": ["run", "${workspaceFolder}/cmd/server"],
       "env": {
-        "ARGOCD_SERVER_URL": "${input:argocd-url}",
+        "ARGOCD_SERVER": "${input:argocd-server}",
+        "ARGOCD_AUTH_TOKEN": "${input:argocd-token}",
         "LOG_LEVEL": "debug",
         "LOG_FORMAT": "text"
       }

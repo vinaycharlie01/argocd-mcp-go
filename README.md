@@ -1,163 +1,158 @@
 # argocd-mcp-go
 
-An [MCP](https://modelcontextprotocol.io) server for **Argo CD**, written in Go, with **per-user Microsoft Entra ID single sign-on**.
+A read-only [MCP](https://modelcontextprotocol.io) server, written in Go, that lets AI clients such as Claude Desktop and VS Code inspect **Argo CD**. Every call runs with **your own Argo CD credentials**, so Argo CD's RBAC decides what you can see.
 
-Each user signs in with their own Microsoft account. The server sends only that user's token to Argo CD, so **Argo CD's existing RBAC decides what they can see and do**. No shared admin token exists anywhere.
+Jenkins support will be added to the same server as a second, independent integration.
 
-> [!NOTE]
-> This first iteration exists to validate SSO. It ships `login`, `whoami`, `logout` and one platform tool, `list_applications`. More tools (app details, resources, logs, sync, refresh, rollback, projects, repositories) will follow once login is confirmed against the lower environment.
+## Tools
 
-## Quick start (local, VS Code / Claude)
+| Tool | Argo CD API | What it returns |
+|---|---|---|
+| `argocd_list_applications` | `GET /api/v1/applications` | Apps with sync/health status. Filters: `projects`, `appNamespace`, `selector`, `search` |
+| `argocd_get_application` | `GET /api/v1/applications/{name}` | Sources, destination, sync policy, conditions, last operation, images, out-of-sync/unhealthy resources |
+| `argocd_get_application_resources` | `GET …/{name}/resource-tree` | Live resources (Deployments, ReplicaSets, Pods, …) with health, sync status and parents. Filters: `kind`, `health` |
+| `argocd_get_application_history` | `status.history` | Deployment history, newest first (ID, revision, time, initiator) |
+| `argocd_get_application_manifests` | `GET …/{name}/manifests` | Rendered target manifests, optionally at a `revision`. **Secret data is masked by Argo CD.** Capped at 1 MB |
+| `argocd_get_application_events` | `GET …/{name}/events` | Kubernetes events, newest first, for the app or one resource |
+| `argocd_get_pod_logs` | `GET …/{name}/logs` | Container logs for one **pod** (`podName`) or a whole **workload** (`kind` + `resourceName`, all pods). Supports `tailLines`, `sinceSeconds`, `container`, `previous`, `filter`. Capped at 1 MB |
 
-The only setting you must provide is the Argo CD URL:
+All tools are read-only. **No Kubernetes cluster access is needed.** Argo CD fetches events and logs on your behalf. Pod logs need the Argo CD RBAC permission `logs, get`.
 
-```bash
-export ARGOCD_SERVER_URL=https://argocd-lowerenv.qwikcilver.com
-task build && ./dist/argocd-mcp      # or: go run ./cmd/argocd-mcp
-```
-
-In VS Code, open this folder and start the `argocd` server from **MCP: List Servers** (see `.vscode/mcp.json`). Then ask the agent to:
-
-1. Run **`login`**. Your default browser (e.g. Chrome) opens the Microsoft sign-in page.
-2. Sign in. The page shows "Login successful".
-3. Run **`whoami`** to see your identity and groups, then **`list_applications`**.
-
-Claude Code:
-
-```bash
-claude mcp add argocd -e ARGOCD_SERVER_URL=https://argocd-lowerenv.qwikcilver.com -- /path/to/dist/argocd-mcp
-```
-
-> [!TIP]
-> Quick pre-check: if `argocd login argocd-lowerenv.qwikcilver.com --sso` works on your laptop, this server will work with no extra Entra configuration. It uses the same client and the same callback.
-
-## How authentication works
+## Authentication
 
 ```text
- MCP client ──tool call──▶ argocd-mcp ──GET /api/v1/settings (anonymous)──▶ Argo CD
-                               │  discovers issuer, client ID, scopes
-                               │
-   browser ◀──── login URL ────┤  Authorization Code + PKCE (S256), state, nonce
-      │                        │
-      └─▶ Entra ID (or Argo CD's Dex → Entra ID) ──redirect──▶ http://localhost:8085/auth/callback
-                               │  code exchange, ID-token signature/issuer/audience/nonce verified
-                               │
-                               └──Authorization: Bearer <user's ID token>──▶ Argo CD API (RBAC enforced)
+Browser SSO (Microsoft Entra ID) ─▶ Argo CD sets cookie argocd.token
+                                          │ you copy the value once
+                                          ▼
+                                 ARGOCD_AUTH_TOKEN (or ARGOCD_AUTH_TOKEN_FILE)
+                                          │
+MCP tool ─▶ REST client ─▶ GET https://<server>/api/v1/...   Authorization: Bearer <token>
 ```
 
-The server resolves the OIDC client the same way `argocd login --sso` does (`pkg/apiclient.OIDCConfig` in argo-cd):
+- The token is **your own** Argo CD session token, so Argo CD applies your RBAC. The server holds no shared or admin credential and implements no OAuth flow or callback.
+- **No gRPC-Web is needed.** The `argocd` CLI needs `--grpc-web` because it speaks gRPC, which many ingresses don't pass through. This server uses the REST/JSON API that the Argo CD web UI uses, over plain HTTPS. If the UI works, this works.
+- **Token rotation:** session tokens expire, usually after about an hour, depending on the SSO configuration. An expired token gives an `unauthorized` error telling you to refresh it. With `ARGOCD_AUTH_TOKEN_FILE`, the file is re-read on every request, so rotating means overwriting the file, with no restart.
+- **Never exposed:** the token is never logged. Log attributes whose names look like secrets are redacted. Tokens never appear in tool results or error messages. HTTP redirects are not followed, so the token can't be sent to another host. Plain `http://` servers are refused.
 
-| Argo CD SSO setup | Issuer | Client ID | Scopes |
-|---|---|---|---|
-| `oidc.config` (Entra ID directly) | `oidcConfig.issuer`, e.g. `https://login.microsoftonline.com/<tenant>/v2.0` | `cliClientID`, else `clientID` | `oidcConfig.scopes`, else `openid profile email groups` |
-| `dex.config` (Entra ID as a Dex connector) | `<argocd-url>/api/dex` | `argo-cd-cli` | default scopes plus `federated:id` |
+### Getting your token
 
-`offline_access` is added when the provider supports it, so tokens refresh silently. Argo CD validates the **ID token**: its signature, its issuer, and that the audience is one of `clientID`, `cliClientID` or `allowedAudiences`. It maps the `groups` claim through `policy.csv`.
+1. Sign in to the Argo CD web UI with SSO.
+2. Open Chrome DevTools → **Application** → **Cookies** → your Argo CD host.
+3. Copy the value of `argocd.token`.
+4. Check it works: `argocd app list --server <host> --grpc-web --auth-token "$ARGOCD_AUTH_TOKEN"`
 
-Security properties:
+> [!WARNING]
+> The token is a credential that acts as you. Keep it in `.env` (git-ignored), in a file readable only by you, or in your MCP client's secret input. Never commit it or paste it into chat.
 
-- **PKCE S256** with a fresh verifier per login, plus a 256-bit `state` and `nonce`. A `state` is single-use and expires after 10 minutes.
-- The ID token is verified locally (JWKS signature, issuer, audience, expiry, nonce) before it is stored.
-- Tokens are kept **in memory only**, per session. They are never written to disk or logs, and logs show only the username and group count.
-- The callback page is served with `no-store`, a strict CSP and `no-referrer`, and error text is HTML-escaped.
-- In local mode the callback listens on loopback only. Remote HTTP endpoints must use HTTPS.
-- The callback URL (`/auth/callback`) is distinct from any logout URL. `logout` drops tokens and returns the IdP's `end_session_endpoint` (from discovery) if you also want to end the browser session.
+> [!IMPORTANT]
+> Copying a browser session token is meant for **local, single-user** use. Shared or production deployments must use an approved identity, for example an Argo CD project role token or an approved service identity with least-privilege RBAC. They must not use a person's session.
 
-## Entra ID / Argo CD administrator checklist
+## Quick start
 
-| Item | Where to find it | Needed for |
-|---|---|---|
-| Tenant ID | Part of `oidcConfig.issuer` (`…/<tenant-id>/v2.0`), or the Dex connector `tenant` | discovered automatically |
-| Client ID | `cliClientID` / `clientID` in `argocd-cm` → `oidc.config` | discovered automatically |
-| Redirect URI | `http://localhost:8085/auth/callback` (local). For HTTP mode: `<MCP_PUBLIC_URL>/auth/callback` | **must be registered** |
-| Scopes | `oidc.config.requestedScopes` | discovered automatically |
-| Groups claim | App registration → Token configuration → groups claim | Argo CD RBAC |
-
-Admin actions, depending on the setup:
-
-- **Direct OIDC:** on the app registration used as `cliClientID` (or `clientID`), add the platform **Mobile and desktop applications** with redirect URI `http://localhost:8085/auth/callback`, and enable **Allow public client flows**. The server needs no client secret. If you use a separate CLI app registration, put it in `cliClientID` so Argo CD accepts its audience.
-- **Dex:** nothing for local mode, because Dex's built-in `argo-cd-cli` client already allows `http://localhost:8085/auth/callback`. HTTP mode needs an extra Dex static client with the public callback URL.
-- **HTTP mode with Entra:** register `<MCP_PUBLIC_URL>/auth/callback` as a redirect URI. A web platform redirect requires `OIDC_CLIENT_SECRET`; a public-client redirect does not.
-
-You can inspect the live configuration yourself:
+Requirements: Go 1.27+ and [Task](https://taskfile.dev) (`go install github.com/go-task/task/v3/cmd/task@latest`).
 
 ```bash
-curl -s https://argocd-lowerenv.qwikcilver.com/api/v1/settings | jq '{url, oidcConfig, dexConfig}'
+cp .env.example .env          # then fill in ARGOCD_SERVER and ARGOCD_AUTH_TOKEN
+task build                    # -> dist/devops-mcp
+task smoke                    # starts the server over stdio and lists the tools
+task test                     # unit tests, no credentials needed
 ```
 
-## Transports
+## Connecting a client (stdio)
 
-| Mode | Use | Identity per… |
-|---|---|---|
-| `stdio` (default) | Local, one user, launched by the MCP client | process |
-| `http` (Streamable HTTP at `/mcp`) | Shared deployment | MCP session: every session logs in separately |
+### VS Code
+
+Open this folder. `.vscode/mcp.json` defines the `devops` server. Start it from **MCP: List Servers**. VS Code prompts for the server host and the token, and stores the token as a secret.
+
+### Claude Desktop
+
+Edit `~/Library/Application Support/Claude/claude_desktop_config.json` on macOS, or `%APPDATA%\Claude\claude_desktop_config.json` on Windows:
+
+```json
+{
+  "mcpServers": {
+    "devops": {
+      "command": "/absolute/path/to/dist/devops-mcp",
+      "env": {
+        "ARGOCD_SERVER": "argocd.example.com",
+        "ARGOCD_AUTH_TOKEN_FILE": "/Users/you/.config/devops-mcp/argocd-token"
+      }
+    }
+  }
+}
+```
+
+Using `ARGOCD_AUTH_TOKEN_FILE` means you can refresh the token without editing this file or restarting Claude.
+
+### Claude Code
 
 ```bash
-MCP_TRANSPORT=http MCP_PUBLIC_URL=https://argocd-mcp.example.com \
-ARGOCD_SERVER_URL=https://argocd-lowerenv.qwikcilver.com ./dist/argocd-mcp
+claude mcp add devops \
+  -e ARGOCD_SERVER=argocd.example.com \
+  -e ARGOCD_AUTH_TOKEN_FILE=$HOME/.config/devops-mcp/argocd-token \
+  -- /absolute/path/to/dist/devops-mcp
 ```
 
-Docker:
+### Docker (stdio)
 
 ```bash
 task docker
-docker run --rm -p 8080:8080 \
-  -e ARGOCD_SERVER_URL=https://argocd-lowerenv.qwikcilver.com \
-  -e MCP_PUBLIC_URL=https://argocd-mcp.example.com \
-  argocd-mcp-go:dev
+docker run -i --rm --env-file .env devops-mcp:dev
 ```
 
 ## Configuration
 
 | Variable | Default | Description |
 |---|---|---|
-| `ARGOCD_SERVER_URL` | — (required) | Argo CD base URL (https) |
-| `ARGOCD_CA_FILE` | | Extra CA bundle (PEM) |
-| `ARGOCD_INSECURE_SKIP_VERIFY` | `false` | Skip TLS verification (lower envs only) |
-| `ARGOCD_REQUEST_TIMEOUT` | `30s` | HTTP timeout |
-| `OIDC_ISSUER_URL` / `OIDC_CLIENT_ID` | discovered | Override discovery |
-| `OIDC_CLIENT_SECRET` | | Only for confidential clients |
-| `OIDC_SCOPES` | discovered | Comma or space separated |
-| `OIDC_REDIRECT_URL` | `http://localhost:8085/auth/callback`, or `<MCP_PUBLIC_URL>/auth/callback` in HTTP mode | OAuth2 callback |
-| `OIDC_DOMAIN_HINT` | | Entra `domain_hint` (e.g. `qwikcilver.com`) |
-| `OIDC_LOGIN_TIMEOUT` | `10m` | Validity of a started login |
-| `OIDC_LOGIN_WAIT` | `2m` | How long `login` blocks waiting for the browser |
-| `OIDC_OPEN_BROWSER` | `true` | Open the browser automatically (stdio) |
-| `MCP_TRANSPORT` | `stdio` | `stdio` or `http` |
-| `MCP_HTTP_ADDR` | `:8080` | Listen address (http) |
-| `MCP_PUBLIC_URL` | | External base URL (required for http) |
-| `MCP_JSON_RESPONSE` | `false` | JSON instead of SSE responses |
-| `LOG_LEVEL` / `LOG_FORMAT` | `info` / `json` | Structured logs (stderr) |
+| `ARGOCD_SERVER` | — | Host (`argocd.example.com`, `host:port`) or `https://` URL. Enables the Argo CD tools |
+| `ARGOCD_AUTH_TOKEN` | — | Your Argo CD token (secret) |
+| `ARGOCD_AUTH_TOKEN_FILE` | — | File containing the token, re-read on every request. Takes precedence over `ARGOCD_AUTH_TOKEN` |
+| `ARGOCD_CA_FILE` | — | Extra CA bundle (PEM) for private CAs |
+| `ARGOCD_INSECURE` | `false` | Skip TLS verification (lower environments only) |
+| `ARGOCD_REQUEST_TIMEOUT` | `30s` | Per-request timeout |
+| `LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error` |
+| `LOG_FORMAT` | `json` | `json` or `text`. Logs go to stderr, because stdout carries the MCP stream |
 
-## Architecture (hexagonal)
+## Errors
+
+Tool errors are returned as MCP error results whose text is a JSON envelope:
+
+```json
+{"error":{"code":"unauthorized","message":"Argo CD rejected the token (401): it is missing, invalid or expired. Refresh ARGOCD_AUTH_TOKEN"}}
+```
+
+| Code | Meaning |
+|---|---|
+| `invalid_input` | The tool arguments failed validation. Argo CD was not called |
+| `unauthorized` | The token is missing, invalid or expired |
+| `forbidden` | Argo CD RBAC denies the action (e.g. `logs, get`) |
+| `not_found` | The application doesn't exist, or you can't see it |
+| `not_configured` | No token is configured, or the token file is empty |
+| `timeout` | The request timed out |
+| `upstream_error` | Network error or unexpected Argo CD response |
+
+## Architecture
 
 ```text
-cmd/argocd-mcp            composition root (wiring, signals, HTTP server)
-internal/core/domain      entities and domain errors
-internal/core/ports       interfaces: ArgoCD API, TokenProvider
-internal/core/service     use cases (list applications)
-internal/adapters/argocd  outbound: Argo CD REST client and SSO discovery
-internal/adapters/mcp     inbound: MCP tools, stdio and Streamable HTTP
-internal/auth             OIDC/PKCE login, token store, refresh, callback
-internal/config           environment configuration and validation
-internal/logging          slog setup
+cmd/server/                 composition root: config → auth → clients → tools → transport
+internal/config/            environment loading and validation; each integration is optional
+internal/auth/argocd/       bearer token source (static, or file re-read per request)
+internal/clients/argocd/    REST client: typed errors, path escaping, streaming logs
+internal/tools/argocd/      MCP tool definitions, input validation, response shaping
+internal/toolkit/           shared error envelope and validators
+internal/mcp/               builds the MCP server from independent tool sets
+internal/transport/         stdio (an HTTP transport can be added here)
+internal/logging/           slog with secret redaction
 ```
+
+- The tools depend on a small interface rather than the HTTP client, so they're tested without a network.
+- Jenkins will add `auth/jenkins`, `clients/jenkins` and `tools/jenkins` without touching the Argo CD packages.
 
 ## Development
 
 ```bash
-task test     # unit tests (includes an end-to-end PKCE login against a fake IdP)
-task race
-task lint
-task build
+task test        # unit tests (httptest mock servers, no credentials)
+task race        # with the race detector
+task vet
+task lint        # golangci-lint
 ```
-
-## Troubleshooting
-
-| Symptom | Cause / fix |
-|---|---|
-| `AADSTS50011` redirect URI mismatch | Register `http://localhost:8085/auth/callback` (Mobile and desktop) on the app registration |
-| `AADSTS7000218` client_secret required | The redirect is registered as Web: register it as Mobile and desktop and enable public client flows, or set `OIDC_CLIENT_SECRET` |
-| `listen on localhost:8085: address already in use` | Another `argocd login --sso` is running, or set `OIDC_REDIRECT_URL` to another registered port |
-| `401` after login | The token's audience is not accepted by Argo CD: add the client ID to `cliClientID` or `allowedAudiences` |
-| Empty application list | Signed in correctly, but RBAC grants no `applications, get` permission to your groups |

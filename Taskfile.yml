@@ -1,7 +1,7 @@
 version: '3'
 
 vars:
-  BINARY_NAME: argocd-mcp
+  BINARY_NAME: devops-mcp
   DIST_DIR: dist
   VERSION:
     sh: git describe --tags --always --dirty 2>/dev/null || echo dev
@@ -23,26 +23,32 @@ tasks:
     desc: Build binary for current platform
     cmds:
       - mkdir -p {{.DIST_DIR}}
-      - go build -trimpath -ldflags "{{.LDFLAGS}}" -o {{.DIST_DIR}}/{{.BINARY_NAME}} ./cmd/argocd-mcp
+      - go build -trimpath -ldflags "{{.LDFLAGS}}" -o {{.DIST_DIR}}/{{.BINARY_NAME}} ./cmd/server
 
   build-linux:
     desc: Cross-compile linux/amd64 and linux/arm64 binaries
     cmds:
       - mkdir -p {{.DIST_DIR}}/linux_amd64 {{.DIST_DIR}}/linux_arm64
-      - CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags "{{.LDFLAGS}}" -o {{.DIST_DIR}}/linux_amd64/{{.BINARY_NAME}} ./cmd/argocd-mcp
-      - CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -ldflags "{{.LDFLAGS}}" -o {{.DIST_DIR}}/linux_arm64/{{.BINARY_NAME}} ./cmd/argocd-mcp
+      - CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags "{{.LDFLAGS}}" -o {{.DIST_DIR}}/linux_amd64/{{.BINARY_NAME}} ./cmd/server
+      - CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -ldflags "{{.LDFLAGS}}" -o {{.DIST_DIR}}/linux_arm64/{{.BINARY_NAME}} ./cmd/server
 
   run:
-    desc: Run locally over stdio (set ARGOCD_SERVER_URL first)
+    desc: Run over stdio (reads ARGOCD_* from the environment or .env)
+    dotenv: ['.env']
     cmds:
-      - go run ./cmd/argocd-mcp
+      - go run ./cmd/server
 
-  run-http:
-    desc: Run Streamable HTTP on :8080 (set ARGOCD_SERVER_URL and MCP_PUBLIC_URL)
-    env:
-      MCP_TRANSPORT: http
+  smoke:
+    desc: Start the server and list its tools over stdio (no credentials needed for listing)
+    dotenv: ['.env']
     cmds:
-      - go run ./cmd/argocd-mcp
+      - task: build
+      - |
+        { printf '%s\n' \
+          '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"smoke","version":"0"}}}' \
+          '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
+          '{"jsonrpc":"2.0","id":2,"method":"tools/list"}'; sleep 1; } \
+          | {{.DIST_DIR}}/{{.BINARY_NAME}} 2>/dev/null | grep -o '"name":"argocd_[a-z_]*"'
 
   test:
     desc: Run unit tests
@@ -72,7 +78,7 @@ tasks:
   docker:
     desc: Build the container image
     cmds:
-      - docker build -t argocd-mcp-go:{{.VERSION}} --build-arg VERSION={{.VERSION}} --build-arg GIT_COMMIT={{.GIT_COMMIT}} .
+      - docker build -t devops-mcp:{{.VERSION}} --build-arg VERSION={{.VERSION}} --build-arg GIT_COMMIT={{.GIT_COMMIT}} .
 
   clean:
     desc: Remove build artifacts
