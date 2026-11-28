@@ -40,6 +40,35 @@ Image names are normalized before comparing (`nginx` = `docker.io/library/nginx`
 
 All tools are read-only. **No Kubernetes cluster access is needed.** Argo CD fetches events and logs on your behalf. Pod logs need the Argo CD RBAC permission `logs, get`.
 
+## Log analysis (`argocd_analyze_pod_logs`)
+
+This tool analyses a Deployment's pod logs, or one pod's, through Argo CD, and returns **compact structured JSON instead of raw logs**. It reuses the same log retrieval as `argocd_get_pod_logs` (`GET /applications/{app}/logs`), so it needs no Kubernetes access. It is read-only.
+
+| `analysis_type` | Returns |
+|---|---|
+| `overview` (default) | Pods with line counts, total lines and entries, first and last timestamp, JSON/plain/malformed counts, error and warning counts |
+| `levels` | DEBUG/INFO/WARN/ERROR/FATAL (+UNKNOWN) counts and percentages, per pod, error rate, last error |
+| `exceptions` | Errors grouped by type (Java, Python, Go panic, JSON `error.type`; untyped errors by message pattern): count, levels, first/last seen, pods, **request IDs**, root cause, a sample message and stack |
+| `patterns` | Repeated messages, with UUIDs, timestamps, IPs, hex IDs, emails, URLs and numbers normalized to `{uuid}`, `{ts}`, `{n}`, …: count, percent, first/last seen, a sample |
+| `http` | Requests from JSON fields, access logs and `key=value` lines: method, status and class distribution, failure rate, endpoints (IDs in paths → `{id}`), failed-request samples with request IDs |
+| `queue_urls` | Unique `queue_ingest_url` values (any JSON depth, or text) with counts, pods, first/last seen |
+| `search` | Entries matching `search` (case-insensitive) and/or a minimum `level`, with optional `context_lines` (0–5) |
+| `sample` | Redacted raw lines, newest first. Only when raw lines are really needed |
+| `all` | All of the above except `sample`; `search` is included only when a keyword or level is given |
+
+Every response has these fields: `application`, `deployment`, `pod`, `analysis_type`, `time_range`, `summary`, `results`, `total_matches`, `truncated`, and `next_offset` when there are more results.
+
+**Parsing:**
+- **JSON logs:** level, message, time and request ID are read from common keys, including nested and dotted forms (`level`, `severity`, `log.level`, `msg`, `message`, `@timestamp`, `ts` as epoch s/ms/ns, `request_id`, `trace_id`, …). Numeric pino and bunyan levels are understood.
+- **Plain text and logfmt are the fallback.** `level=…`, `[warn]`, `ERROR`, and leading timestamps are all recognized. **Malformed JSON** falls back to text parsing and is counted separately.
+- **Multi-line stack traces are merged into one event.** That covers Java (`at …`, `Caused by:`, and an un-indented `pkg.SomeException:` header after an ERROR line), Python tracebacks, and Go panics.
+- The container runtime's timestamp, from Argo CD, takes precedence over timestamps inside the log line.
+
+**Limits and safety:**
+- **Fetch:** `tail_lines` per container (default 2000, max 20000), `since` (`15m`, `2h`, `1d`, max `7d`, or an RFC3339 time), and at most 8 MiB per call. `summary.notes` says when the fetch was cut.
+- **Results:** at most `max_results` items per list (default 20, max 200), paged with `offset` and `next_offset`. Messages, stacks and context are size-capped.
+- **Secrets:** all returned text is redacted, including auth headers, bearer/basic tokens, cookies, passwords and API keys, JWTs, AWS keys, and URL credentials. Query strings are dropped from HTTP paths and queue URLs, so signed URLs aren't exposed.
+
 ## Authentication
 
 ```text
@@ -162,6 +191,7 @@ internal/auth/argocd/       bearer token source (static, or file re-read per req
 internal/clients/argocd/    REST client: typed errors, path escaping, streaming logs
 internal/tools/argocd/      MCP tool definitions, input validation, response shaping
 internal/imageref/          image reference parsing/normalization (tag, registry digest)
+internal/loganalysis/       log parsing (JSON/logfmt/plain, stack merging), analyzers, redaction
 internal/toolkit/           shared error envelope and validators
 internal/mcp/               builds the MCP server from independent tool sets
 internal/transport/         stdio (an HTTP transport can be added here)

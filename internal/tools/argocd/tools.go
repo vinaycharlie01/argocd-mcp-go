@@ -96,6 +96,8 @@ func (t *Tools) Register(s *mcp.Server) {
 			"MATCH, MATCH_TAG_ONLY, MIXED_ROLLOUT, TAG_MATCH_DIGEST_DIFFERENT, DIFFERENT_TAG or NOT_FOUND.",
 		Annotations: readOnly,
 	}, t.getImages)
+
+	registerAnalyzeLogs(s, t)
 }
 
 // appInput is embedded by every single-application tool.
