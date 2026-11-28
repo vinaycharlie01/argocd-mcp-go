@@ -21,6 +21,7 @@ type API interface {
 	GetManifests(ctx context.Context, ref client.AppRef, revision string) (*client.ManifestResponse, error)
 	ListEvents(ctx context.Context, ref client.AppRef, f client.EventFilter) ([]client.Event, error)
 	GetLogs(ctx context.Context, ref client.AppRef, o client.LogOptions) (*client.LogResult, error)
+	GetResource(ctx context.Context, ref client.AppRef, r client.ResourceQuery) (map[string]any, error)
 }
 
 // Tools holds the dependencies of the Argo CD tools.
@@ -85,6 +86,16 @@ func (t *Tools) Register(s *mcp.Server) {
 			"Use argocd_get_application_resources to find pod names. Supports tailLines, sinceSeconds, container, previous (crashed container) and a server-side filter.",
 		Annotations: readOnly,
 	}, t.getLogs)
+
+	mcp.AddTool(s, &mcp.Tool{
+		Name:  "argocd_get_images",
+		Title: "Get running images and digests",
+		Description: "List the container images of an Argo CD application per workload and container: the image Git wants (desired), " +
+			"and what pods actually run (tag and registry digest sha256, with pod names). Flags mixed rollouts and Git-vs-running drift. " +
+			"Optionally pass 'expected' images (e.g. from jenkins_get_build_images) to get a deterministic verdict: " +
+			"MATCH, MATCH_TAG_ONLY, MIXED_ROLLOUT, TAG_MATCH_DIGEST_DIFFERENT, DIFFERENT_TAG or NOT_FOUND.",
+		Annotations: readOnly,
+	}, t.getImages)
 }
 
 // appInput is embedded by every single-application tool.

@@ -15,6 +15,28 @@ Jenkins support will be added to the same server as a second, independent integr
 | `argocd_get_application_manifests` | `GET …/{name}/manifests` | Rendered target manifests, optionally at a `revision`. **Secret data is masked by Argo CD.** Capped at 1 MB |
 | `argocd_get_application_events` | `GET …/{name}/events` | Kubernetes events, newest first, for the app or one resource |
 | `argocd_get_pod_logs` | `GET …/{name}/logs` | Container logs for one **pod** (`podName`) or a whole **workload** (`kind` + `resourceName`, all pods). Supports `tailLines`, `sinceSeconds`, `container`, `previous`, `filter`. Capped at 1 MB |
+| `argocd_get_images` | `…/resource-tree` + `…/resource` (Pods) + `…/manifests` | Images per workload and container: **desired** (Git), **running tag and registry digest** (with pod names), mixed-rollout and drift flags. Optional `expected` images give a verdict (see below) |
+
+## Verifying the deployed image (`argocd_get_images`)
+
+For each workload container this tool reports:
+- the image **Git wants** (from the rendered manifests);
+- the image tag and **registry digest** each pod **actually runs**. The digest comes from the pod's `status.containerStatuses[].imageID`; local image IDs such as `docker://sha256:…` are ignored because they can't be compared;
+- `mixedRollout`: pods disagree on the image;
+- `drift`: the running image differs from Git.
+
+Pass `expected` images, for example the output of `jenkins_get_build_images` from [jenkins-mcp-go](https://github.com/vinaycharlie01/jenkins-mcp-go), to get a deterministic verdict:
+
+| Verdict | Meaning |
+|---|---|
+| `MATCH` | Every pod runs exactly the expected digest |
+| `MATCH_TAG_ONLY` | The tags match, but no digest was available to verify |
+| `MIXED_ROLLOUT` | Only some pods run the expected image: a rollout is in progress or stuck |
+| `TAG_MATCH_DIGEST_DIFFERENT` | Same tag, different image: the tag was re-pushed, pods weren't restarted, or a multi-arch index digest is being compared with a platform digest |
+| `DIFFERENT_TAG` | The expected image isn't running. The hint says whether Git already has it, so check the rollout, or not, so it isn't deployed yet |
+| `NOT_FOUND` | No container of the app uses that repository |
+
+Image names are normalized before comparing (`nginx` = `docker.io/library/nginx`). Pod lookups are capped by `maxPods` (default 30).
 
 All tools are read-only. **No Kubernetes cluster access is needed.** Argo CD fetches events and logs on your behalf. Pod logs need the Argo CD RBAC permission `logs, get`.
 
@@ -139,6 +161,7 @@ internal/config/            environment loading and validation; each integration
 internal/auth/argocd/       bearer token source (static, or file re-read per request)
 internal/clients/argocd/    REST client: typed errors, path escaping, streaming logs
 internal/tools/argocd/      MCP tool definitions, input validation, response shaping
+internal/imageref/          image reference parsing/normalization (tag, registry digest)
 internal/toolkit/           shared error envelope and validators
 internal/mcp/               builds the MCP server from independent tool sets
 internal/transport/         stdio (an HTTP transport can be added here)
