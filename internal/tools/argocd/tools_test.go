@@ -19,6 +19,7 @@ type fakeAPI struct {
 	man      *client.ManifestResponse
 	events   []client.Event
 	logs     *client.LogResult
+	pods     map[string]map[string]any
 	lastLogs client.LogOptions
 	err      error
 	calls    int
@@ -66,6 +67,20 @@ func (f *fakeAPI) GetLogs(_ context.Context, r client.AppRef, o client.LogOption
 	f.lastRef, f.lastLogs = r, o
 
 	return f.logs, f.err
+}
+
+func (f *fakeAPI) GetResource(_ context.Context, r client.AppRef, q client.ResourceQuery) (map[string]any, error) {
+	f.calls++
+	f.lastRef = r
+	if f.err != nil {
+		return nil, f.err
+	}
+	p, ok := f.pods[q.Name]
+	if !ok || q.Kind != "Pod" || q.Version != "v1" {
+		return nil, &client.APIError{Status: 404, Message: "not found"}
+	}
+
+	return p, nil
 }
 
 func session(t *testing.T, api API) *mcp.ClientSession {
@@ -142,7 +157,7 @@ func TestAllToolsRegistered(t *testing.T) {
 			t.Errorf("%s must be read-only", tl.Name)
 		}
 	}
-	want := "argocd_get_application,argocd_get_application_events,argocd_get_application_history,argocd_get_application_manifests,argocd_get_application_resources,argocd_get_pod_logs,argocd_list_applications"
+	want := "argocd_get_application,argocd_get_application_events,argocd_get_application_history,argocd_get_application_manifests,argocd_get_application_resources,argocd_get_images,argocd_get_pod_logs,argocd_list_applications"
 	if strings.Join(names, ",") != want {
 		t.Fatalf("tools = %v", names)
 	}

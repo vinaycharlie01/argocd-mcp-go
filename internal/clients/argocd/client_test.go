@@ -271,3 +271,26 @@ func TestGetLogsTruncatesAndStreamErrors(t *testing.T) {
 		t.Fatalf("got %v", err)
 	}
 }
+
+func TestGetResource(t *testing.T) {
+	var q string
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/applications/web/resource" {
+			t.Errorf("path %s", r.URL.Path)
+		}
+		q = r.URL.RawQuery
+		jsonResp(w, `{"manifest":"{\"kind\":\"Pod\",\"status\":{\"phase\":\"Running\"}}"}`)
+	})
+	obj, err := c.GetResource(context.Background(), AppRef{Name: "web", Project: "p"}, ResourceQuery{Namespace: "ns", Name: "web-1", Version: "v1", Kind: "Pod"})
+	if err != nil || obj["kind"] != "Pod" {
+		t.Fatalf("%v %v", err, obj)
+	}
+	for _, want := range []string{"namespace=ns", "resourceName=web-1", "version=v1", "kind=Pod", "project=p"} {
+		if !strings.Contains(q, want) {
+			t.Errorf("query %q missing %s", q, want)
+		}
+	}
+	if strings.Contains(q, "group=") {
+		t.Errorf("empty group must be omitted: %s", q)
+	}
+}

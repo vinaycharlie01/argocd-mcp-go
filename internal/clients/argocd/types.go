@@ -123,19 +123,15 @@ type applicationList struct {
 
 // ResourceNode is a node of the application resource tree.
 type ResourceNode struct {
-	Group           string `json:"group,omitempty"`
-	Version         string `json:"version,omitempty"`
-	Kind            string `json:"kind"`
-	Namespace       string `json:"namespace,omitempty"`
-	Name            string `json:"name"`
-	UID             string `json:"uid,omitempty"`
-	ResourceVersion string `json:"resourceVersion,omitempty"`
-	ParentRefs      []struct {
-		Kind      string `json:"kind"`
-		Namespace string `json:"namespace,omitempty"`
-		Name      string `json:"name"`
-	} `json:"parentRefs,omitempty"`
-	Info []struct {
+	Group           string      `json:"group,omitempty"`
+	Version         string      `json:"version,omitempty"`
+	Kind            string      `json:"kind"`
+	Namespace       string      `json:"namespace,omitempty"`
+	Name            string      `json:"name"`
+	UID             string      `json:"uid,omitempty"`
+	ResourceVersion string      `json:"resourceVersion,omitempty"`
+	ParentRefs      []ParentRef `json:"parentRefs,omitempty"`
+	Info            []struct {
 		Name  string `json:"name"`
 		Value string `json:"value"`
 	} `json:"info,omitempty"`
@@ -145,6 +141,15 @@ type ResourceNode struct {
 		Message string `json:"message,omitempty"`
 	} `json:"health,omitempty"`
 	CreatedAt string `json:"createdAt,omitempty"`
+}
+
+// ParentRef points from a tree node to its owner.
+type ParentRef struct {
+	Group     string `json:"group,omitempty"`
+	Kind      string `json:"kind"`
+	Namespace string `json:"namespace,omitempty"`
+	Name      string `json:"name"`
+	UID       string `json:"uid,omitempty"`
 }
 
 // ResourceTree is the response of /resource-tree.
