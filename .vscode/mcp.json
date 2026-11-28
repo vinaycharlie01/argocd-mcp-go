@@ -15,6 +15,18 @@
     }
   ],
   "servers": {
+    // WRITE-ENABLED: image update + confirmed sync. Do not enable "auto-approve" for its tools.
+    "argocd-deploy": {
+      "type": "stdio",
+      "command": "go",
+      "args": ["run", "${workspaceFolder}/cmd/deploy"],
+      "env": {
+        "ARGOCD_SERVER": "${input:argocd-server}",
+        "ARGOCD_AUTH_TOKEN": "${input:argocd-token}",
+        "LOG_LEVEL": "debug",
+        "LOG_FORMAT": "text"
+      }
+    },
     "devops": {
       "type": "stdio",
       "command": "go",

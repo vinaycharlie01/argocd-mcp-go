@@ -21,6 +21,10 @@ const (
 	CodeNotConfigured = "not_configured"
 	CodeTimeout       = "timeout"
 	CodeUpstream      = "upstream_error"
+	// Write-path codes.
+	CodeConflict           = "conflict"             // operation running, concurrent change, sync window
+	CodeConfirmation       = "confirmation_invalid" // missing/expired/mismatched confirmation
+	CodePreconditionFailed = "precondition_failed"  // policy refuses (project, ApplicationSet, source type)
 )
 
 // ToolError is the error every tool returns. Its message is a JSON envelope

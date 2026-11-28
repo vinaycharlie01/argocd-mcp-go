@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"strconv"
 )
 
@@ -89,7 +90,7 @@ func (c *Client) GetLogs(ctx context.Context, ref AppRef, o LogOptions) (*LogRes
 		maxBytes = defaultMaxLogBytes
 	}
 
-	resp, err := c.send(ctx, q, "applications", ref.Name, "logs")
+	resp, err := c.send(ctx, http.MethodGet, q, nil, "applications", ref.Name, "logs")
 	if err != nil {
 		return nil, err
 	}
