@@ -1,0 +1,80 @@
+version: '3'
+
+vars:
+  BINARY_NAME: argocd-mcp
+  DIST_DIR: dist
+  VERSION:
+    sh: git describe --tags --always --dirty 2>/dev/null || echo dev
+  GIT_COMMIT:
+    sh: git rev-parse --short HEAD 2>/dev/null || echo unknown
+  LDFLAGS: >-
+    -s -w
+    -X github.com/vinaycharlie01/argocd-mcp-go/pkg/version.Version={{.VERSION}}
+    -X github.com/vinaycharlie01/argocd-mcp-go/pkg/version.GitCommit={{.GIT_COMMIT}}
+
+tasks:
+  default:
+    desc: List available tasks
+    silent: true
+    cmds:
+      - task --list
+
+  build:
+    desc: Build binary for current platform
+    cmds:
+      - mkdir -p {{.DIST_DIR}}
+      - go build -trimpath -ldflags "{{.LDFLAGS}}" -o {{.DIST_DIR}}/{{.BINARY_NAME}} ./cmd/argocd-mcp
+
+  build-linux:
+    desc: Cross-compile linux/amd64 and linux/arm64 binaries
+    cmds:
+      - mkdir -p {{.DIST_DIR}}/linux_amd64 {{.DIST_DIR}}/linux_arm64
+      - CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags "{{.LDFLAGS}}" -o {{.DIST_DIR}}/linux_amd64/{{.BINARY_NAME}} ./cmd/argocd-mcp
+      - CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -ldflags "{{.LDFLAGS}}" -o {{.DIST_DIR}}/linux_arm64/{{.BINARY_NAME}} ./cmd/argocd-mcp
+
+  run:
+    desc: Run locally over stdio (set ARGOCD_SERVER_URL first)
+    cmds:
+      - go run ./cmd/argocd-mcp
+
+  run-http:
+    desc: Run Streamable HTTP on :8080 (set ARGOCD_SERVER_URL and MCP_PUBLIC_URL)
+    env:
+      MCP_TRANSPORT: http
+    cmds:
+      - go run ./cmd/argocd-mcp
+
+  test:
+    desc: Run unit tests
+    cmds:
+      - go test -short -timeout=120s ./...
+
+  race:
+    desc: Run tests with race detector
+    cmds:
+      - go test -race -short -timeout=120s ./...
+
+  coverage:
+    desc: Run tests with coverage
+    cmds:
+      - go test -coverprofile=coverage.out -timeout=120s ./...
+
+  vet:
+    desc: Run go vet
+    cmds:
+      - go vet ./...
+
+  lint:
+    desc: Run golangci-lint
+    cmds:
+      - golangci-lint run --timeout=10m ./...
+
+  docker:
+    desc: Build the container image
+    cmds:
+      - docker build -t argocd-mcp-go:{{.VERSION}} --build-arg VERSION={{.VERSION}} --build-arg GIT_COMMIT={{.GIT_COMMIT}} .
+
+  clean:
+    desc: Remove build artifacts
+    cmds:
+      - rm -rf {{.DIST_DIR}} coverage.out

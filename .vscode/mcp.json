@@ -1,0 +1,24 @@
+{
+  // Open this folder in VS Code, then start "argocd" from "MCP: List Servers".
+  // Ask the agent to run the `login` tool: your browser opens the Microsoft sign-in.
+  "inputs": [
+    {
+      "type": "promptString",
+      "id": "argocd-url",
+      "description": "Argo CD URL",
+      "default": "https://argocd-lowerenv.qwikcilver.com"
+    }
+  ],
+  "servers": {
+    "argocd": {
+      "type": "stdio",
+      "command": "go",
+      "args": ["run", "${workspaceFolder}/cmd/argocd-mcp"],
+      "env": {
+        "ARGOCD_SERVER_URL": "${input:argocd-url}",
+        "LOG_LEVEL": "debug",
+        "LOG_FORMAT": "text"
+      }
+    }
+  }
+}
